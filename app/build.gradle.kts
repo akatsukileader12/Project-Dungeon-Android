@@ -8,7 +8,9 @@ repositories {
     mavenCentral()
 }
 
-val jmeVersion = "3.6.1-stable"
+// Kept in lockstep with core/build.gradle.kts -- see the comment there for
+// why this must match exactly (AbstractMethodError otherwise).
+val jmeVersion = "3.7.0-stable"
 
 android {
     namespace = "com.example.dungeon.android"
