@@ -1,0 +1,33 @@
+# Gradle
+.gradle/
+build/
+*.class
+
+# Gradle wrapper distributions cache (not the wrapper jar/properties themselves)
+gradle/wrapper/dists/
+
+# Android
+local.properties
+.cxx/
+captures/
+*.apk
+*.ap_
+*.dex
+
+# IntelliJ / Android Studio
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# macOS
+.DS_Store
+
+# Native libs extracted at runtime
+*.dylib
+*.so
+*.dll
+
+# Logs
+*.log
