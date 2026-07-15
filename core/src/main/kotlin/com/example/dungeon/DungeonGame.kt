@@ -516,3 +516,11 @@ class DungeonGame : SimpleApplication() {
             guiNode.attachChild(this)
         }
 }
+
+// FloatArray destructuring up to 6 elements (used in setupWalls)
+private operator fun FloatArray.component1() = this[0]
+private operator fun FloatArray.component2() = this[1]
+private operator fun FloatArray.component3() = this[2]
+private operator fun FloatArray.component4() = this[3]
+private operator fun FloatArray.component5() = this[4]
+private operator fun FloatArray.component6() = this[5]
