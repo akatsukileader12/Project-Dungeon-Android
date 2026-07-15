@@ -35,13 +35,12 @@ private const val PLAYER_MAX_HP      = 5
 private const val ARENA_HALF         = 13.5f
 
 // Ranged attacks fire partway through the attack pose (the "release" beat),
-// not the instant the button is pressed -- matches the staff-thrust / bow-draw
-// animation in Humanoid.attackPoseAngle.
+// not the instant the button is pressed.
 private const val RANGED_RELEASE_FRACTION = 0.5f
 private const val PROJECTILE_HIT_DIST     = 1.1f
 private const val PROJECTILE_MAX_LIFE     = 2.5f
 
-// Camera shake on a landed boss hit -- short and punchy, decays to zero.
+// Camera shake on a landed boss hit.
 private const val HIT_SHAKE_DURATION = 0.28f
 private const val HIT_SHAKE_MAG      = 0.35f
 
@@ -78,10 +77,9 @@ private class Projectile(
 class DungeonGame : SimpleApplication() {
 
     /**
-     * The hero class for this run. MUST be set (if not Warrior) before the GL
-     * render loop reaches [simpleInitApp] -- e.g. by MainActivity, immediately
-     * after instantiating this app and before attaching its GLSurfaceView to
-     * the window. Changing it after init has no effect on the current run.
+     * The hero class for this run. Set by MainActivity before the GL thread
+     * starts (before setContentView). Can also be changed mid-game via
+     * [switchClass], which must be called on the GL thread.
      */
     var playerClass: PlayerClass = PlayerClass.WARRIOR
 
@@ -89,9 +87,9 @@ class DungeonGame : SimpleApplication() {
     private lateinit var playerNode: Node
     private lateinit var humanoid:   Humanoid
 
-    // Boss — spawned further back so it doesn't immediately aggro.
-    // Player spawns at z=5; boss at z=-11 → initial distance ≈ 16 > DETECT_RANGE(12).
-    private lateinit var dragonBoss: DragonBoss
+    // Boss
+    private lateinit var dragonBoss:  DragonBoss
+    private var bossAvailable = false  // false when boss failed to load
     private val bossSpawnPos = Vector3f(0f, 0f, -11f)
 
     // Player movement
@@ -108,18 +106,17 @@ class DungeonGame : SimpleApplication() {
     private var attackHitDealt  = false
     private var rangedReleased  = false
 
-    // Archer dodge-roll: a brief invulnerability window fired on the rising
-    // edge of the defense button, instead of a continuous hold-to-block.
+    // Archer dodge-roll invulnerability.
     private var dodgeInvulnTimer = 0f
     private var prevDefenseHeld  = false
 
     // Camera shake, triggered by a landed boss hit.
     private var shakeTimer = 0f
 
-    // In-flight player projectiles (Mage fireballs / Archer arrows).
+    // In-flight player projectiles.
     private val projectiles = mutableListOf<Projectile>()
     private lateinit var fireballMat: Material
-    private lateinit var arrowMat: Material
+    private lateinit var arrowMat:    Material
 
     // HP / state
     private var playerHp = PLAYER_MAX_HP
@@ -127,16 +124,41 @@ class DungeonGame : SimpleApplication() {
         private set
 
     /**
+     * Set to true on the GL thread once simpleInitApp completes.
+     * MainActivity checks this after wiring [onInitComplete] to avoid a
+     * race where init finishes before the callback is registered.
+     */
+    @Volatile var initComplete = false
+
+    /**
      * Fired on the GL thread when the game ends.
-     * Wire up from MainActivity (remember to post UI changes to the UI thread).
+     * Post UI changes to the UI thread inside this callback.
      */
     var onGameOver: ((won: Boolean) -> Unit)? = null
 
     /**
-     * Fired on the GL thread at the end of simpleInitApp — all assets are loaded
-     * and the scene is ready. Use to dismiss a loading overlay from the UI.
+     * Fired on the GL thread at the end of simpleInitApp.
+     * Use to dismiss a loading overlay.
      */
     var onInitComplete: (() -> Unit)? = null
+
+    /**
+     * Called by MainActivity when the user picks a new class via the
+     * in-battle settings menu. MUST be called on the GL thread via
+     * app.enqueue { switchClass(cls) }.
+     *
+     * Rebuilds the player model and resets the match with the new class.
+     */
+    fun switchClass(newClass: PlayerClass) {
+        playerClass = newClass
+        // Rebuild the procedural hero for the new class.
+        playerNode.detachChild(humanoid.root)
+        humanoid = Humanoid(assetManager, playerClass)
+        playerNode.attachChild(humanoid.root)
+        // Rebuild projectile materials for the new class.
+        buildProjectileMaterials()
+        restartGame()
+    }
 
     // HUD
     private lateinit var hudFont:      BitmapFont
@@ -146,6 +168,7 @@ class DungeonGame : SimpleApplication() {
     private lateinit var playerHpText: BitmapText
     private lateinit var statusText:   BitmapText
     private lateinit var restartHint:  BitmapText
+    private lateinit var classLabel:   BitmapText
     private var lastPlayerHp = -1
     private var lastBossHp   = -1
 
@@ -158,7 +181,6 @@ class DungeonGame : SimpleApplication() {
     // ── Lifecycle ──────────────────────────────────────────────────────────────
 
     override fun simpleInitApp() {
-        // Hide the jME debug stats/FPS counter shown in the bottom-left corner.
         setDisplayStatView(false)
         setDisplayFps(false)
 
@@ -170,8 +192,11 @@ class DungeonGame : SimpleApplication() {
         setupBoss()
         setupHUD()
         setupMouseInput()
+        buildProjectileMaterials()
 
-        // Signal the loading overlay that the scene is fully ready.
+        // Mark init complete BEFORE firing the callback so MainActivity's
+        // race-condition check works correctly.
+        initComplete = true
         onInitComplete?.invoke()
     }
 
@@ -186,72 +211,82 @@ class DungeonGame : SimpleApplication() {
     private fun setupLighting() {
         rootNode.addLight(DirectionalLight().apply {
             direction = Vector3f(-0.4f, -1f, -0.6f).normalizeLocal()
-            color     = ColorRGBA(0.85f, 0.80f, 0.70f, 1f)
+            color = ColorRGBA(1.0f, 0.92f, 0.78f, 1f)
         })
         rootNode.addLight(AmbientLight().apply {
-            color = ColorRGBA(0.28f, 0.25f, 0.30f, 1f)
+            color = ColorRGBA(0.28f, 0.22f, 0.30f, 1f)
         })
+        // Warm torch light near the center.
         rootNode.addLight(PointLight().apply {
-            color    = ColorRGBA(1.0f, 0.65f, 0.20f, 1f)
-            radius   = 18f
-            position = Vector3f(0f, 3f, 5f)
+            position = Vector3f(0f, 3f, 0f)
+            color    = ColorRGBA(1.0f, 0.55f, 0.15f, 1f)
+            radius   = 22f
         })
-        rootNode.addLight(PointLight().apply {
-            color    = ColorRGBA(0.35f, 0.50f, 1.0f, 1f)
-            radius   = 16f
-            position = Vector3f(0f, 4f, -7f)
+        // Cool back-fill.
+        rootNode.addLight(DirectionalLight().apply {
+            direction = Vector3f(0.3f, -0.5f, 0.7f).normalizeLocal()
+            color = ColorRGBA(0.20f, 0.25f, 0.45f, 1f)
         })
     }
 
     private fun setupGround() {
-        rootNode.attachChild(Geometry("Ground", Quad(40f, 40f)).apply {
+        val ground = Geometry("Ground", Box(ARENA_HALF, 0.1f, ARENA_HALF)).apply {
             material = mat("Common/MatDefs/Light/Lighting.j3md") {
                 setBoolean("UseMaterialColors", true)
-                setColor("Diffuse", ColorRGBA(0.28f, 0.25f, 0.22f, 1f))
-                setColor("Ambient", ColorRGBA(0.15f, 0.13f, 0.12f, 1f))
+                setColor("Diffuse",  ColorRGBA(0.18f, 0.14f, 0.12f, 1f))
+                setColor("Ambient",  ColorRGBA(0.08f, 0.06f, 0.05f, 1f))
+                setColor("Specular", ColorRGBA(0.05f, 0.05f, 0.05f, 1f))
+                setFloat("Shininess", 4f)
             }
-            rotate(-FastMath.HALF_PI, 0f, 0f)
-            setLocalTranslation(-20f, 0f, 20f)
-        })
+            setLocalTranslation(0f, -0.1f, 0f)
+        }
+        rootNode.attachChild(ground)
     }
 
     private fun setupWalls() {
+        // [halfW, halfH, halfD, tx, ty, tz]
+        val walls = arrayOf(
+            floatArrayOf(ARENA_HALF, 2f, 0.4f,  0f, 2f, -ARENA_HALF),
+            floatArrayOf(ARENA_HALF, 2f, 0.4f,  0f, 2f,  ARENA_HALF),
+            floatArrayOf(0.4f, 2f, ARENA_HALF, -ARENA_HALF, 2f, 0f),
+            floatArrayOf(0.4f, 2f, ARENA_HALF,  ARENA_HALF, 2f, 0f),
+        )
         val wallMat = mat("Common/MatDefs/Light/Lighting.j3md") {
             setBoolean("UseMaterialColors", true)
-            setColor("Diffuse", ColorRGBA(0.35f, 0.30f, 0.25f, 1f))
-            setColor("Ambient", ColorRGBA(0.10f, 0.09f, 0.08f, 1f))
+            setColor("Diffuse",  ColorRGBA(0.22f, 0.18f, 0.15f, 1f))
+            setColor("Ambient",  ColorRGBA(0.06f, 0.05f, 0.04f, 1f))
+            setColor("Specular", ColorRGBA(0.04f, 0.04f, 0.04f, 1f))
+            setFloat("Shininess", 6f)
         }
-        listOf(
-            floatArrayOf( 0f,  1.5f, -14f,  14f, 1.5f, 0.5f),
-            floatArrayOf( 0f,  1.5f,  14f,  14f, 1.5f, 0.5f),
-            floatArrayOf(-14f, 1.5f,   0f, 0.5f, 1.5f,  14f),
-            floatArrayOf( 14f, 1.5f,   0f, 0.5f, 1.5f,  14f),
-        ).forEach { (cx, cy, cz, hw, hh, hd) ->
+        for ((hw, hh, hd, tx, ty, tz) in walls) {
             rootNode.attachChild(Geometry("Wall", Box(hw, hh, hd)).apply {
                 material = wallMat
-                setLocalTranslation(cx, cy, cz)
+                setLocalTranslation(tx, ty, tz)
             })
         }
     }
 
     private fun setupPlayer() {
-        humanoid   = Humanoid(assetManager, playerClass)
-        playerNode = Node("PlayerNode").apply { setLocalTranslation(0f, 0f, 5f) }
+        playerNode = Node("Player")
+        playerNode.setLocalTranslation(0f, 0f, 5f)
+        humanoid = Humanoid(assetManager, playerClass)
         playerNode.attachChild(humanoid.root)
         rootNode.attachChild(playerNode)
-
-        fireballMat = mat("Common/MatDefs/Misc/Unshaded.j3md") {
-            setColor("Color", ColorRGBA(0.95f, 0.45f, 0.10f, 1f))
-        }
-        arrowMat = mat("Common/MatDefs/Misc/Unshaded.j3md") {
-            setColor("Color", ColorRGBA(0.55f, 0.42f, 0.24f, 1f))
-        }
     }
 
     private fun setupBoss() {
-        dragonBoss = DragonBoss(assetManager)
-        dragonBoss.node.setLocalTranslation(bossSpawnPos.clone())
-        rootNode.attachChild(dragonBoss.node)
+        try {
+            dragonBoss = DragonBoss(assetManager)
+            dragonBoss.node.setLocalTranslation(bossSpawnPos.clone())
+            rootNode.attachChild(dragonBoss.node)
+            bossAvailable = true
+        } catch (e: Exception) {
+            // Model failed to load — create a placeholder so the rest of the game works.
+            bossAvailable = false
+            dragonBoss = DragonBoss.createFallback(assetManager)
+            dragonBoss.node.setLocalTranslation(bossSpawnPos.clone())
+            rootNode.attachChild(dragonBoss.node)
+        }
     }
 
     private fun setupHUD() {
@@ -277,9 +312,26 @@ class DungeonGame : SimpleApplication() {
             ColorRGBA(0.18f, 0.82f, 0.18f, 1f))
         playerHpText = hudText("Hero", 15f, px, py + PLAYER_BAR_H + 18f)
 
+        // Class label — top-right (updated by switchClass / restartGame)
+        classLabel = hudText(playerClass.displayName, 14f, sw - 100f, sh - 14f)
+        classLabel.color = ColorRGBA(0.75f, 0.75f, 0.85f, 0.85f)
+
         // End-game overlay
         statusText  = hudText("", 52f, sw / 2f - 170f, sh / 2f + 30f)
         restartHint = hudText("", 22f, sw / 2f - 130f, sh / 2f - 20f)
+    }
+
+    private fun buildProjectileMaterials() {
+        fireballMat = mat("Common/MatDefs/Misc/Unshaded.j3md") {
+            setColor("Color", ColorRGBA(1f, 0.45f, 0.05f, 1f))
+        }
+        arrowMat = mat("Common/MatDefs/Light/Lighting.j3md") {
+            setBoolean("UseMaterialColors", true)
+            setColor("Diffuse",  ColorRGBA(0.60f, 0.45f, 0.20f, 1f))
+            setColor("Ambient",  ColorRGBA(0.20f, 0.14f, 0.06f, 1f))
+            setColor("Specular", ColorRGBA(0.8f,  0.8f,  0.6f,  1f))
+            setFloat("Shininess", 32f)
+        }
     }
 
     /**
@@ -319,9 +371,6 @@ class DungeonGame : SimpleApplication() {
     }
 
     // ── Public restart — MUST be called on the GL thread ──────────────────────
-    //
-    //  From Android: use  app.enqueue(Callable { game.restartGame(); null })
-    //  From desktop: the tapListener already runs on the GL thread.
 
     fun restartGame() {
         playerHp           = PLAYER_MAX_HP
@@ -346,6 +395,7 @@ class DungeonGame : SimpleApplication() {
         dragonBoss.reset()
 
         lastPlayerHp = -1;  lastBossHp = -1
+        classLabel.text  = playerClass.displayName
         statusText.text  = ""
         restartHint.text = ""
         floatNums.forEach { guiNode.detachChild(it.text) }
@@ -375,7 +425,7 @@ class DungeonGame : SimpleApplication() {
         attackTimer      = (attackTimer      - tpf).coerceAtLeast(0f)
         attackCooldown   = (attackCooldown   - tpf).coerceAtLeast(0f)
         dashTimer        = (dashTimer        - tpf).coerceAtLeast(0f)
-        dashCooldown      = (dashCooldown    - tpf).coerceAtLeast(0f)
+        dashCooldown     = (dashCooldown     - tpf).coerceAtLeast(0f)
         dodgeInvulnTimer = (dodgeInvulnTimer - tpf).coerceAtLeast(0f)
         shakeTimer       = (shakeTimer       - tpf).coerceAtLeast(0f)
 
@@ -400,64 +450,81 @@ class DungeonGame : SimpleApplication() {
             }
         }
 
-        // Archer's defensive button is a tap-triggered dodge, not a hold: fire
-        // once on the rising edge and grant a short i-frame window.
-        if (!cls.defenseIsHold && input.defenseHeld && !prevDefenseHeld) {
-            dodgeInvulnTimer = cls.dodgeInvulnDuration
+        // Archer dodge-roll: fire on rising edge of defense button.
+        if (cls == PlayerClass.ARCHER) {
+            val held = input.defenseHeld
+            if (held && !prevDefenseHeld && dashCooldown <= 0f) {
+                dashTimer    = cls.dodgeInvulnDuration
+                dashCooldown = cls.dodgeInvulnDuration + cls.dashCooldown
+                dodgeInvulnTimer = cls.dodgeInvulnDuration
+                dashDirection    = facing.clone()
+            }
+            prevDefenseHeld = held
         }
-        prevDefenseHeld = input.defenseHeld
     }
 
     private fun movePlayer(tpf: Float) {
-        val jVec = Vector3f(input.moveX, 0f, -input.moveY)
-        val jMag = jVec.length()
-
-        val moveDir: Vector3f
-        val speed: Float
-
-        when {
-            dashTimer > 0f -> { moveDir = dashDirection; speed = playerClass.dashSpeed }
-            jMag > JOYSTICK_DEADZONE -> {
-                targetPosition = null
-                moveDir = jVec.normalize()
-                speed   = MOVE_SPEED * jMag.coerceAtMost(1f)
-            }
-            targetPosition != null -> {
-                val toT = targetPosition!!.subtract(playerNode.localTranslation)
-                    .also { it.y = 0f }
-                if (toT.length() < 0.08f) {
-                    targetPosition = null;  lastMoveDistance = 0f;  return
-                }
-                moveDir = toT.normalize()
-                speed   = MOVE_SPEED
-            }
-            else -> { lastMoveDistance = 0f; return }
-        }
-
         val cls = playerClass
-        val slow = when {
-            dodgeInvulnTimer > 0f            -> cls.dodgeSpeedMultiplier
-            cls.defenseIsHold && input.defenseHeld -> cls.defenseSlowFactor
-            else                              -> 1f
-        }
-        val step = moveDir.mult(speed * slow * tpf)
-        playerNode.move(step)
-        lastMoveDistance = step.length()
+        val mx  = input.moveX
+        val my  = input.moveY
 
-        // Clamp inside arena (replaces physics wall collision)
-        val p = playerNode.localTranslation
+        // Dash slide (non-blink classes).
+        if (dashTimer > 0f && !cls.dashIsBlink) {
+            val speed = cls.dashSpeed
+            val move  = dashDirection.mult(speed * tpf)
+            val p     = playerNode.localTranslation
+            playerNode.setLocalTranslation(
+                (p.x + move.x).coerceIn(-ARENA_HALF, ARENA_HALF),
+                0f,
+                (p.z + move.z).coerceIn(-ARENA_HALF, ARENA_HALF)
+            )
+            lastMoveDistance = move.length()
+            return
+        }
+
+        // Joystick movement.
+        val raw  = Vector3f(mx, 0f, -my)
+        val len  = raw.length()
+        if (len < JOYSTICK_DEADZONE) {
+            // Click-to-move target (desktop).
+            targetPosition?.let { target ->
+                val diff = target.subtract(playerNode.localTranslation)
+                val dist = diff.length()
+                if (dist < 0.2f) {
+                    targetPosition = null
+                    lastMoveDistance = 0f
+                } else {
+                    val slowFactor = if (cls.defenseIsHold && input.defenseHeld) cls.defenseSlowFactor else 1f
+                    val step = diff.normalize().mult(MOVE_SPEED * slowFactor * tpf)
+                    val p = playerNode.localTranslation
+                    playerNode.setLocalTranslation(
+                        (p.x + step.x).coerceIn(-ARENA_HALF, ARENA_HALF),
+                        0f,
+                        (p.z + step.z).coerceIn(-ARENA_HALF, ARENA_HALF)
+                    )
+                    lastMoveDistance = step.length()
+                    if (dist > 0.01f) facing = diff.normalize()
+                }
+            } ?: run { lastMoveDistance = 0f }
+            return
+        }
+
+        val moveDir    = raw.normalize()
+        val slowFactor = if (cls.defenseIsHold && input.defenseHeld) cls.defenseSlowFactor else 1f
+        val speed      = MOVE_SPEED * slowFactor * (len.coerceIn(0f, 1f))
+        val move       = moveDir.mult(speed * tpf)
+        val p          = playerNode.localTranslation
         playerNode.setLocalTranslation(
-            p.x.coerceIn(-ARENA_HALF, ARENA_HALF),
+            (p.x + move.x).coerceIn(-ARENA_HALF, ARENA_HALF),
             0f,
-            p.z.coerceIn(-ARENA_HALF, ARENA_HALF)
+            (p.z + move.z).coerceIn(-ARENA_HALF, ARENA_HALF)
         )
+        lastMoveDistance = move.length()
 
         if (dashTimer <= 0f && moveDir.lengthSquared() > 0.0001f) facing = moveDir.clone()
         playerNode.localRotation = Quaternion().lookAt(facing, Vector3f.UNIT_Y)
     }
 
-    /** Mage's Arcane Blink: an instant hop in the facing direction (clamped to
-     *  the arena), rather than a timed slide like the other classes' dash. */
     private fun blinkPlayer(distance: Float) {
         val dest = playerNode.localTranslation.add(facing.mult(distance))
         playerNode.setLocalTranslation(
@@ -482,11 +549,10 @@ class DungeonGame : SimpleApplication() {
 
     // ── Boss ───────────────────────────────────────────────────────────────────
 
-    /** Returns true the frame the boss's lunge connects (used to drive shake/flinch feedback). */
     private fun updateBoss(tpf: Float): Boolean {
         val bossHit = dragonBoss.update(tpf, playerNode.localTranslation)
 
-        // Pin boss Y to ground — some animation root-bone channels drift it upward.
+        // Pin boss Y to ground — some animation root-bone channels drift it.
         val p = dragonBoss.node.localTranslation
         if (p.y != 0f) dragonBoss.node.setLocalTranslation(p.x, 0f, p.z)
 
@@ -507,13 +573,12 @@ class DungeonGame : SimpleApplication() {
         return false
     }
 
-    /** Fired the frame a boss hit lands unblocked: flinches the hero model and shakes the camera. */
     private fun triggerHitFeedback() {
         hurtPulseThisFrame = true
         shakeTimer = HIT_SHAKE_DURATION
     }
 
-    // ── Player attack ────────────────────────────────────────────────────────
+    // ── Player attack ─────────────────────────────────────────────────────────
 
     private fun checkPlayerAttack() {
         if (attackTimer <= 0f) return
@@ -528,7 +593,7 @@ class DungeonGame : SimpleApplication() {
             return
         }
 
-        if (attackHitDealt || progress > 0.60f) return  // past active melee frames
+        if (attackHitDealt || progress > 0.60f) return
         val dist = playerNode.localTranslation.distance(dragonBoss.node.localTranslation)
         if (dist <= cls.attackRange) {
             attackHitDealt = true
@@ -668,13 +733,13 @@ class DungeonGame : SimpleApplication() {
 
     private fun hudText(txt: String, size: Float, x: Float, y: Float): BitmapText =
         BitmapText(hudFont, false).apply {
-            this.size = size;  text = txt
+            this.size = size; text = txt
             setLocalTranslation(x, y, 2f)
             guiNode.attachChild(this)
         }
 }
 
-// FloatArray destructuring up to 6 elements (used in setupWalls)
+// FloatArray destructuring up to 6 elements
 private operator fun FloatArray.component1() = this[0]
 private operator fun FloatArray.component2() = this[1]
 private operator fun FloatArray.component3() = this[2]
