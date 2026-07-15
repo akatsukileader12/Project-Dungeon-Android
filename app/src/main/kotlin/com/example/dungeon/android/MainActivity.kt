@@ -1,6 +1,7 @@
 package com.example.dungeon.android
 
 import android.graphics.Color
+import android.graphics.Typeface
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -13,8 +14,8 @@ import com.example.dungeon.android.ui.JoystickView
 import com.jme3.app.AndroidHarness
 
 /**
- * Android entry point.  AndroidHarness loads [DungeonGame] via reflection and
- * drives it with an OpenGL ES context.
+ * Android entry point.  AndroidHarness loads [DungeonGame] via reflection
+ * and drives it with an OpenGL ES context.
  */
 class MainActivity : AndroidHarness() {
 
@@ -29,61 +30,114 @@ class MainActivity : AndroidHarness() {
         frameRate       = -1
 
         // The on-screen joystick/buttons drive DungeonGame.input directly;
-        // we do not need AndroidHarness's built-in mouse emulation.
-        mouseEventsEnabled   = false
+        // jME's built-in mouse/joystick emulation is not needed.
+        mouseEventsEnabled    = false
         joystickEventsEnabled = false
 
-        finishOnAppStop  = true
-        handleExitHook   = true
+        finishOnAppStop   = true
+        handleExitHook    = true
         exitDialogTitle   = "Exit Project Dungeon?"
-        exitDialogMessage = "Press Home to keep the game running in the background, or confirm to exit."
+        exitDialogMessage = "Press Home to keep the game running in the " +
+                "background, or confirm to exit."
 
         screenFullScreen = true
         screenShowTitle  = false
     }
 
+    // ── Play Again button, created once and shown/hidden via onGameOver ────────
+
+    private lateinit var playAgainBtn: TextView
+
+    // ── Layout ─────────────────────────────────────────────────────────────────
+
     /**
-     * Wrap the GL surface in a FrameLayout so we can layer the HUD controls
-     * and the Play Again button on top without touching the engine view.
+     * AndroidHarness calls this from onCreate() after the jME [app] instance
+     * has been instantiated (via reflection from [appClass]) but before
+     * [com.jme3.app.Application.start] has been invoked.
+     *
+     * We wrap the GL surface in a FrameLayout so we can layer the HUD
+     * controls and the Play Again button on top without touching the engine.
      */
     override fun layoutDisplay() {
-        val gameView = this.view
-        (gameView.parent as? ViewGroup)?.removeView(gameView)
+        // `view` is the GLSurfaceView set up by AndroidHarness.
+        val glView = view
 
         val overlay = FrameLayout(this)
         overlay.addView(
-            gameView,
+            glView,
             FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
 
-        (app as? DungeonGame)?.let { game ->
-            overlay.addView(buildControlsLayer(game))
-            overlay.addView(buildRestartButton(game))
-        }
+        // Build and overlay the HUD controls.
+        overlay.addView(buildControlsLayer())
+
+        // Build the Play Again button (initially invisible).
+        playAgainBtn = buildPlayAgainButton()
+        overlay.addView(
+            playAgainBtn,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+            ).apply {
+                val dp = resources.displayMetrics.density
+                topMargin = (60 * dp).toInt()
+            }
+        )
 
         setContentView(overlay)
+
+        // Wire the restart callback now — app is already instantiated.
+        (app as? DungeonGame)?.onGameOver = { _ ->
+            runOnUiThread { playAgainBtn.visibility = View.VISIBLE }
+        }
+    }
+
+    // ── Play Again button ──────────────────────────────────────────────────────
+
+    private fun buildPlayAgainButton(): TextView {
+        val dp = resources.displayMetrics.density
+        return TextView(this).apply {
+            text      = "Play Again"
+            textSize  = 20f
+            typeface  = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.argb(210, 40, 40, 40))
+            setPadding(
+                (24 * dp).toInt(), (14 * dp).toInt(),
+                (24 * dp).toInt(), (14 * dp).toInt()
+            )
+            visibility = View.GONE
+
+            setOnClickListener {
+                visibility = View.GONE
+                (app as? DungeonGame)?.restartGame()
+            }
+        }
     }
 
     // ── Action buttons + joystick ──────────────────────────────────────────────
 
-    private fun buildControlsLayer(game: DungeonGame): FrameLayout {
+    private fun buildControlsLayer(): FrameLayout {
         val dp = resources.displayMetrics.density
-        fun dp(v: Float) = (v * dp).toInt()
+        fun dpI(v: Float) = (v * dp).toInt()
 
         val layer = FrameLayout(this)
 
         // Movement joystick — bottom-left
         val joystick = JoystickView(this).apply {
-            onMove = { x, y -> game.input.moveX = x; game.input.moveY = y }
+            onMove = { x, y ->
+                (app as? DungeonGame)?.input?.let { it.moveX = x; it.moveY = y }
+            }
         }
         layer.addView(
             joystick,
-            FrameLayout.LayoutParams(dp(150f), dp(150f), Gravity.BOTTOM or Gravity.START).apply {
-                leftMargin   = dp(28f)
-                bottomMargin = dp(28f)
+            FrameLayout.LayoutParams(dpI(150f), dpI(150f), Gravity.BOTTOM or Gravity.START).apply {
+                leftMargin   = dpI(28f)
+                bottomMargin = dpI(28f)
             }
         )
 
@@ -92,87 +146,40 @@ class MainActivity : AndroidHarness() {
         val shieldAccent = Color.rgb(0x3E, 0x7B, 0xC4)
         val dashAccent   = Color.rgb(0xD8, 0xA6, 0x3A)
 
+        // Sword — taller slot so it doesn't overlap the other two
         layer.addView(
             ActionButton(this, ActionIcon.SWORD, swordAccent).apply {
-                onDown = { game.input.swordQueued = true }
+                onDown = { (app as? DungeonGame)?.input?.swordQueued = true }
             },
-            FrameLayout.LayoutParams(dp(76f), dp(76f), Gravity.BOTTOM or Gravity.END).apply {
-                rightMargin  = dp(28f)
-                bottomMargin = dp(96f)
+            FrameLayout.LayoutParams(dpI(76f), dpI(76f), Gravity.BOTTOM or Gravity.END).apply {
+                rightMargin  = dpI(28f)
+                bottomMargin = dpI(96f)
             }
         )
+
+        // Dash
         layer.addView(
             ActionButton(this, ActionIcon.DASH, dashAccent).apply {
-                onDown = { game.input.dashQueued = true }
+                onDown = { (app as? DungeonGame)?.input?.dashQueued = true }
             },
-            FrameLayout.LayoutParams(dp(64f), dp(64f), Gravity.BOTTOM or Gravity.END).apply {
-                rightMargin  = dp(112f)
-                bottomMargin = dp(24f)
+            FrameLayout.LayoutParams(dpI(64f), dpI(64f), Gravity.BOTTOM or Gravity.END).apply {
+                rightMargin  = dpI(112f)
+                bottomMargin = dpI(24f)
             }
         )
+
+        // Shield (hold)
         layer.addView(
             ActionButton(this, ActionIcon.SHIELD, shieldAccent).apply {
-                onDown = { game.input.shieldHeld = true }
-                onUp   = { game.input.shieldHeld = false }
+                onDown = { (app as? DungeonGame)?.input?.shieldHeld = true  }
+                onUp   = { (app as? DungeonGame)?.input?.shieldHeld = false }
             },
-            FrameLayout.LayoutParams(dp(64f), dp(64f), Gravity.BOTTOM or Gravity.END).apply {
-                rightMargin  = dp(20f)
-                bottomMargin = dp(24f)
+            FrameLayout.LayoutParams(dpI(64f), dpI(64f), Gravity.BOTTOM or Gravity.END).apply {
+                rightMargin  = dpI(20f)
+                bottomMargin = dpI(24f)
             }
         )
 
         return layer
-    }
-
-    // ── Play Again button ──────────────────────────────────────────────────────
-
-    private fun buildRestartButton(game: DungeonGame): TextView {
-        val dp = resources.displayMetrics.density
-
-        val btn = TextView(this).apply {
-            text      = "Play Again"
-            textSize  = 20f
-            typeface  = android.graphics.Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.argb(210, 40, 40, 40))
-            setPadding(
-                (24 * dp).toInt(), (14 * dp).toInt(),
-                (24 * dp).toInt(), (14 * dp).toInt()
-            )
-            visibility = View.GONE   // hidden until the game ends
-        }
-
-        // Show the button as soon as the engine reports game-over.
-        // onGameOver is called on the GL thread, so post to the UI thread.
-        game.onGameOver = { _ ->
-            runOnUiThread { btn.visibility = View.VISIBLE }
-        }
-
-        btn.setOnClickListener {
-            btn.visibility = View.GONE
-            // restartGame() is thread-safe: it only writes volatile fields and
-            // jME scene operations are serialized in simpleUpdate on the GL thread.
-            game.restartGame()
-        }
-
-        return FrameLayout(this).apply {
-            addView(
-                btn,
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    Gravity.CENTER
-                ).apply { topMargin = (60 * dp).toInt() }
-            )
-        }.also { container ->
-            // The container fills the screen so the button centres correctly.
-            container.layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-            // Intercept touch only when visible to avoid blocking game input.
-            container.isClickable = false
-            container.isFocusable = false
-        }
     }
 }
