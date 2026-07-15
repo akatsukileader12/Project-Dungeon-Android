@@ -26,6 +26,11 @@ dependencies {
     implementation("org.jmonkeyengine:jme3-core:$jmeVersion")
     implementation("org.jmonkeyengine:jme3-effects:$jmeVersion")
 
+    // glTF 2.0 loader -- lets us load rigged/animated models (e.g. the
+    // dragon boss) exported from Blender, instead of only procedural
+    // primitive geometry.
+    implementation("org.jmonkeyengine:jme3-plugins:$jmeVersion")
+
     // Compile-only: gives us the com.jme3.bullet.* API surface (Minie is a
     // drop-in replacement for the discontinued jme3-bullet) without pulling
     // in native binaries. The "+bare" variant ships zero natives.
