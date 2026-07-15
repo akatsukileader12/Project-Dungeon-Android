@@ -34,6 +34,16 @@ private const val WINDUP_DURATION  = 0.90f
 private const val STAGGER_DURATION = 0.80f
 private const val POST_ATK_PAUSE   = 0.65f
 
+// Windup telegraph: the dragon "coils" back and down before it lunges, so a
+// player watching the model (not just a timer) gets a readable warning.
+private const val WINDUP_COIL_SCALE = 0.90f
+
+// Impact snap: a quick squash-forward punch on the model the instant the
+// lunge connects, so a hit reads as an actual impact rather than a silent
+// HP-bar tick. This is layered on top of the baked clips since the model
+// has no dedicated bite/attack animation.
+private const val IMPACT_SNAP_DURATION = 0.22f
+
 private const val ANIM_IDLE = "Idel_New"  // sic — matches baked clip name
 private const val ANIM_WALK = "Walk_New"
 private const val ANIM_RUN  = "Run_New"
@@ -57,6 +67,7 @@ class DragonBoss(private val assetManager: AssetManager) {
 
     private val composer: AnimComposer?
     private var currentAnim = ""
+    private lateinit var modelRef: Spatial
 
     // Set to true after each init/reset; first update() call fires playAnim so
     // the AnimComposer is guaranteed to be in the scene graph first.
@@ -67,6 +78,15 @@ class DragonBoss(private val assetManager: AssetManager) {
     private var lungeMoved = 0f
     private var hitDone    = false
 
+    // Procedural feedback layered on top of the baked clips (no bite/attack
+    // clip exists in the source model — see tuning notes above).
+    private var impactSnapTimer = 0f
+
+    /** True for a couple of frames right after the lunge connects — lets the
+     *  game layer trigger camera shake / player flinch in the same instant. */
+    var justLandedHit = false
+        private set
+
     // ── Init ──────────────────────────────────────────────────────────────────
 
     init {
@@ -76,10 +96,14 @@ class DragonBoss(private val assetManager: AssetManager) {
         // (ATTACK_RANGE, BOSS_HIT_DIST, …) works directly in world units.
         model.setLocalScale(DRAGON_SCALE)
 
-        // Blender → glTF: model face is +Z; jME forward is -Z → rotate 180° Y.
-        model.rotate(0f, FastMath.PI, 0f)
-
+        // NOTE: do NOT add an extra 180° Y rotation here. Quaternion.lookAt()
+        // (used in face() below) aligns the node's local +Z axis with the
+        // target direction, and this model's authored forward is already
+        // local +Z. An extra 180° flip here was cancelling that out, which
+        // made the dragon always face directly away from whatever it was
+        // walking toward (i.e. it appeared to walk backwards, tail-first).
         node.attachChild(model)
+        modelRef = model
 
         composer = findAnimComposer(model)
         // Do NOT call playAnim here — AnimComposer.setCurrentAction() silently
@@ -95,6 +119,10 @@ class DragonBoss(private val assetManager: AssetManager) {
             needsAnimInit = false
             playAnim(ANIM_IDLE)
         }
+
+        justLandedHit = false
+        impactSnapTimer = (impactSnapTimer - tpf).coerceAtLeast(0f)
+        applyProceduralPose()
 
         if (state == State.DEAD) return false
 
@@ -129,8 +157,11 @@ class DragonBoss(private val assetManager: AssetManager) {
         stateTimer = 0f
         lungeMoved = 0f
         hitDone    = false
+        impactSnapTimer = 0f
+        justLandedHit = false
         lungeDir.set(0f, 0f, -1f)
         needsAnimInit = true   // re-trigger animation init after scene reset
+        modelRef.setLocalScale(DRAGON_SCALE)
         go(State.IDLE)
     }
 
@@ -170,6 +201,11 @@ class DragonBoss(private val assetManager: AssetManager) {
         return false
     }
 
+    /** Coil-back scale during windup: shrinks toward the ground as the timer
+     *  runs out, like a predator loading a spring before it lunges. */
+    private fun windupCoilProgress(): Float =
+        if (state == State.WINDUP) 1f - (stateTimer / WINDUP_DURATION) else 0f
+
     private fun tickAttack(tpf: Float, dist: Float): Boolean {
         // Advance the lunge only while budget remains AND we haven't already hit.
         if (!hitDone && lungeMoved < MAX_LUNGE_DIST) {
@@ -181,8 +217,10 @@ class DragonBoss(private val assetManager: AssetManager) {
 
         var hitPlayer = false
         if (!hitDone && dist <= BOSS_HIT_DIST) {
-            hitDone   = true
-            hitPlayer = true
+            hitDone       = true
+            hitPlayer     = true
+            justLandedHit = true
+            impactSnapTimer = IMPACT_SNAP_DURATION
         }
 
         // Transition to stagger when:
@@ -212,6 +250,26 @@ class DragonBoss(private val assetManager: AssetManager) {
             State.STAGGER -> playAnim(ANIM_IDLE)
             State.DEAD    -> playAnim(ANIM_IDLE)
         }
+    }
+
+    /** Blends the windup coil and impact-snap punch into the model's scale
+     *  every frame. Purely cosmetic — never touches world-space translation
+     *  so distance-based combat math (ATTACK_RANGE, BOSS_HIT_DIST) is unaffected. */
+    private fun applyProceduralPose() {
+        val coil = windupCoilProgress()
+        val coilScale = FastMath.interpolateLinear(coil, 1f, WINDUP_COIL_SCALE)
+
+        val snapT = if (IMPACT_SNAP_DURATION > 0f) impactSnapTimer / IMPACT_SNAP_DURATION else 0f
+        // Punch forward (stretch Z) and squash (shrink X/Y) for one quick beat.
+        val punch = FastMath.sin(snapT * FastMath.PI) * snapT.coerceAtLeast(0f)
+        val stretch = 1f + punch * 0.22f
+        val squash  = 1f - punch * 0.12f
+
+        modelRef.setLocalScale(
+            DRAGON_SCALE * coilScale * squash,
+            DRAGON_SCALE * coilScale * squash,
+            DRAGON_SCALE * coilScale * stretch,
+        )
     }
 
     private fun face(dir: Vector3f) {

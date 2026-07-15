@@ -10,15 +10,15 @@ import android.graphics.Shader
 import android.view.MotionEvent
 import android.view.View
 
-enum class ActionIcon { SWORD, SHIELD, DASH }
+enum class ActionIcon { SWORD, SHIELD, DASH, STAFF, BOW, WARD, BLINK, DODGE }
 
 /**
  * A round HUD button with a hand-drawn icon glyph (no image assets), a
  * colored glow themed per-action, and a press animation.
  *
- * - [SWORD] and [DASH] are one-shot: [onDown] fires once per tap.
- * - [SHIELD] is a hold button: [onDown]/[onUp] bracket the press so the
- *   caller can drive a "held" state.
+ * One-shot buttons ([SWORD]/[DASH]/[STAFF]/[BOW]/[BLINK]/[DODGE]) fire
+ * [onDown] once per tap. Hold buttons ([SHIELD]/[WARD]) bracket the press
+ * with [onDown]/[onUp] so the caller can drive a continuous "held" state.
  */
 class ActionButton(
     context: Context,
@@ -119,6 +119,57 @@ class ActionButton(
                     }
                     canvas.drawPath(path, iconPaint)
                 }
+            }
+            ActionIcon.STAFF -> {
+                // A vertical staff shaft with a glowing orb at the top -- Mage's fireball.
+                canvas.drawLine(cx - s * 0.15f, cy + s, cx + s * 0.45f, cy - s * 0.75f, iconPaint)
+                canvas.drawCircle(cx + s * 0.55f, cy - s * 0.85f, r * 0.22f, iconFillPaint)
+            }
+            ActionIcon.BOW -> {
+                // A curved bow limb with a drawn string -- Archer's arrow shot.
+                val path = Path().apply {
+                    moveTo(cx + s * 0.35f, cy - s * 0.95f)
+                    cubicTo(cx - s * 0.75f, cy - s * 0.5f, cx - s * 0.75f, cy + s * 0.5f, cx + s * 0.35f, cy + s * 0.95f)
+                }
+                canvas.drawPath(path, iconPaint)
+                canvas.drawLine(cx + s * 0.35f, cy - s * 0.95f, cx - s * 0.15f, cy, iconPaint)
+                canvas.drawLine(cx - s * 0.15f, cy, cx + s * 0.35f, cy + s * 0.95f, iconPaint)
+                canvas.drawLine(cx - s * 0.15f, cy, cx + s * 0.85f, cy, iconPaint)
+            }
+            ActionIcon.WARD -> {
+                // A soft hexagonal barrier -- Mage's magic ward (block).
+                val path = Path().apply {
+                    moveTo(cx, cy - s)
+                    lineTo(cx + s * 0.87f, cy - s * 0.5f)
+                    lineTo(cx + s * 0.87f, cy + s * 0.5f)
+                    lineTo(cx, cy + s)
+                    lineTo(cx - s * 0.87f, cy + s * 0.5f)
+                    lineTo(cx - s * 0.87f, cy - s * 0.5f)
+                    close()
+                }
+                canvas.drawPath(path, iconPaint)
+                canvas.drawCircle(cx, cy, r * 0.16f, iconFillPaint)
+            }
+            ActionIcon.BLINK -> {
+                // A dotted arc + a small diamond "landing" mark -- teleport hop.
+                canvas.drawArc(cx - s, cy - s, cx + s, cy + s, -60f, 120f, false, iconPaint)
+                val d = r * 0.14f
+                canvas.save()
+                canvas.translate(cx + s * 0.7f, cy)
+                canvas.rotate(45f)
+                canvas.drawRect(-d, -d, d, d, iconFillPaint)
+                canvas.restore()
+            }
+            ActionIcon.DODGE -> {
+                // A curved motion-swirl -- rolling out of the way.
+                canvas.drawArc(cx - s * 0.8f, cy - s * 0.8f, cx + s * 0.8f, cy + s * 0.8f, 20f, 280f, false, iconPaint)
+                val path = Path().apply {
+                    moveTo(cx + s * 0.55f, cy - s * 0.55f)
+                    lineTo(cx + s * 0.85f, cy - s * 0.55f)
+                    lineTo(cx + s * 0.7f, cy - s * 0.22f)
+                    close()
+                }
+                canvas.drawPath(path, iconFillPaint)
             }
         }
     }

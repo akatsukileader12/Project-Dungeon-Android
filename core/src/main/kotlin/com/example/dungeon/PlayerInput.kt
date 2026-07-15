@@ -17,12 +17,25 @@ class PlayerInput {
     /** Joystick vertical axis, -1 (pulled toward the player) .. 1 (pushed away). */
     @Volatile var moveY = 0f
 
-    /** Set true for one frame by the UI when the sword button is tapped; [DungeonGame] consumes and clears it. */
-    @Volatile var swordQueued = false
+    /**
+     * Set true for one frame by the UI when the primary-attack button is tapped;
+     * [DungeonGame] consumes and clears it. Meaning depends on the active
+     * [PlayerClass]: sword swing (Warrior), fireball (Mage), or arrow (Archer).
+     */
+    @Volatile var attackQueued = false
 
-    /** Set true for one frame by the UI when the dash button is tapped; [DungeonGame] consumes and clears it. */
-    @Volatile var dashQueued = false
+    /**
+     * Set true for one frame by the UI when the mobility button is tapped;
+     * [DungeonGame] consumes and clears it. Meaning depends on the active
+     * [PlayerClass]: dash (Warrior/Archer) or blink (Mage).
+     */
+    @Volatile var abilityQueued = false
 
-    /** True for as long as the shield button is held down. */
-    @Volatile var shieldHeld = false
+    /**
+     * True for as long as the defensive button is held down. Only consumed as
+     * a continuous hold by hold-to-block classes (Warrior/Mage); for
+     * tap-to-dodge classes (Archer) [DungeonGame] instead reacts to the
+     * rising edge of this flag as a one-shot dodge trigger.
+     */
+    @Volatile var defenseHeld = false
 }

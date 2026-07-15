@@ -12,6 +12,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.example.dungeon.DungeonGame
+import com.example.dungeon.PlayerClass
 import com.example.dungeon.android.ui.ActionButton
 import com.example.dungeon.android.ui.ActionIcon
 import com.example.dungeon.android.ui.JoystickView
@@ -45,9 +46,22 @@ class MainActivity : AndroidHarness() {
     private lateinit var percentLabel:    TextView
     private var progressAnimator: ValueAnimator? = null
 
+    /**
+     * The class chosen on [ClassSelectActivity], read from the launch intent.
+     * MUST be applied to the [DungeonGame] instance before [view] (the
+     * GLSurfaceView) is attached below -- that attach is what starts the GL
+     * render thread, which runs simpleInitApp and reads this value once.
+     */
+    private val selectedClass: PlayerClass by lazy {
+        val name = intent.getStringExtra(EXTRA_PLAYER_CLASS)
+        PlayerClass.entries.firstOrNull { it.name == name } ?: PlayerClass.WARRIOR
+    }
+
     // ── Layout ─────────────────────────────────────────────────────────────────
 
     override fun layoutDisplay() {
+        (app as? DungeonGame)?.playerClass = selectedClass
+
         val glView = view
 
         val root = FrameLayout(this)
@@ -233,6 +247,7 @@ class MainActivity : AndroidHarness() {
 
     private fun buildControlsLayer(): FrameLayout {
         val layer = FrameLayout(this)
+        val cls = selectedClass
 
         // Joystick — bottom-left
         layer.addView(
@@ -246,31 +261,50 @@ class MainActivity : AndroidHarness() {
             }
         )
 
-        // Sword — bottom-right, raised
+        // Primary attack — bottom-right, raised. Icon/color read as the
+        // class's identity: sword swing, fireball, or arrow shot.
+        val attackIcon = when (cls) {
+            PlayerClass.WARRIOR -> ActionIcon.SWORD
+            PlayerClass.MAGE    -> ActionIcon.STAFF
+            PlayerClass.ARCHER  -> ActionIcon.BOW
+        }
+        val attackColor = when (cls) {
+            PlayerClass.WARRIOR -> Color.rgb(0xC9, 0x3A, 0x3A)
+            PlayerClass.MAGE    -> Color.rgb(0xB8, 0x4A, 0xE0)
+            PlayerClass.ARCHER  -> Color.rgb(0x5C, 0x9A, 0x4A)
+        }
         layer.addView(
-            ActionButton(this, ActionIcon.SWORD, Color.rgb(0xC9, 0x3A, 0x3A)).apply {
-                onDown = { (app as? DungeonGame)?.input?.swordQueued = true }
+            ActionButton(this, attackIcon, attackColor).apply {
+                onDown = { (app as? DungeonGame)?.input?.attackQueued = true }
             },
             FrameLayout.LayoutParams(dp(76), dp(76), Gravity.BOTTOM or Gravity.END).apply {
                 rightMargin = dp(28);  bottomMargin = dp(96)
             }
         )
 
-        // Dash — bottom-right, left of shield
+        // Mobility — bottom-right, left of the defensive button. Dash for
+        // Warrior/Archer, Arcane Blink (teleport) for Mage.
+        val abilityIcon = if (cls == PlayerClass.MAGE) ActionIcon.BLINK else ActionIcon.DASH
         layer.addView(
-            ActionButton(this, ActionIcon.DASH, Color.rgb(0xD8, 0xA6, 0x3A)).apply {
-                onDown = { (app as? DungeonGame)?.input?.dashQueued = true }
+            ActionButton(this, abilityIcon, Color.rgb(0xD8, 0xA6, 0x3A)).apply {
+                onDown = { (app as? DungeonGame)?.input?.abilityQueued = true }
             },
             FrameLayout.LayoutParams(dp(64), dp(64), Gravity.BOTTOM or Gravity.END).apply {
                 rightMargin = dp(112);  bottomMargin = dp(24)
             }
         )
 
-        // Shield — bottom-right corner (hold)
+        // Defense — bottom-right corner. Hold-to-block shield/ward for
+        // Warrior/Mage; tap-to-dodge roll for Archer.
+        val defenseIcon = when (cls) {
+            PlayerClass.WARRIOR -> ActionIcon.SHIELD
+            PlayerClass.MAGE    -> ActionIcon.WARD
+            PlayerClass.ARCHER  -> ActionIcon.DODGE
+        }
         layer.addView(
-            ActionButton(this, ActionIcon.SHIELD, Color.rgb(0x3E, 0x7B, 0xC4)).apply {
-                onDown = { (app as? DungeonGame)?.input?.shieldHeld = true  }
-                onUp   = { (app as? DungeonGame)?.input?.shieldHeld = false }
+            ActionButton(this, defenseIcon, Color.rgb(0x3E, 0x7B, 0xC4)).apply {
+                onDown = { (app as? DungeonGame)?.input?.defenseHeld = true  }
+                onUp   = { (app as? DungeonGame)?.input?.defenseHeld = false }
             },
             FrameLayout.LayoutParams(dp(64), dp(64), Gravity.BOTTOM or Gravity.END).apply {
                 rightMargin = dp(20);  bottomMargin = dp(24)
@@ -288,4 +322,9 @@ class MainActivity : AndroidHarness() {
         ViewGroup.LayoutParams.MATCH_PARENT,
         ViewGroup.LayoutParams.MATCH_PARENT
     )
+
+    companion object {
+        /** Intent extra key for the [PlayerClass.name] chosen on [ClassSelectActivity]. */
+        const val EXTRA_PLAYER_CLASS = "player_class"
+    }
 }
