@@ -23,38 +23,36 @@ import com.jme3.scene.shape.Quad
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
-private const val MOVE_SPEED        = 6f
-private const val CAM_HEIGHT        = 22f
-private const val CAM_DISTANCE      = 14f
+private const val MOVE_SPEED         = 6f
+private const val CAM_HEIGHT         = 22f
+private const val CAM_DISTANCE       = 14f
 
 private const val JOYSTICK_DEADZONE  = 0.15f
 private const val SHIELD_SLOW_FACTOR = 0.45f
 
-private const val ATTACK_DURATION  = 0.42f
-private const val ATTACK_COOLDOWN  = 0.18f
+private const val ATTACK_DURATION    = 0.42f
+private const val ATTACK_COOLDOWN    = 0.18f
 
-private const val DASH_DURATION    = 0.22f
-private const val DASH_COOLDOWN    = 0.55f
-private const val DASH_SPEED       = 20f
+private const val DASH_DURATION      = 0.22f
+private const val DASH_COOLDOWN      = 0.55f
+private const val DASH_SPEED         = 20f
 
-private const val SWORD_HIT_RANGE  = 4.0f
-private const val PLAYER_MAX_HP    = 5
+private const val SWORD_HIT_RANGE    = 4.0f
+private const val PLAYER_MAX_HP      = 5
 
-// Arena half-extents — player is clamped inside this box.
-private const val ARENA_HALF       = 13.5f
+// Player is clamped inside ±ARENA_HALF on the XZ plane.
+private const val ARENA_HALF         = 13.5f
 
 // HUD
-private const val BOSS_BAR_W   = 240f
-private const val BOSS_BAR_H   = 18f
-private const val PLAYER_BAR_W = 150f
-private const val PLAYER_BAR_H = 18f
-private const val BAR_TOP_PAD  = 44f
+private const val BOSS_BAR_W    = 240f
+private const val BOSS_BAR_H    = 18f
+private const val PLAYER_BAR_W  = 150f
+private const val PLAYER_BAR_H  = 18f
+private const val BAR_TOP_PAD   = 44f
 
-// ── Game state ─────────────────────────────────────────────────────────────────
+// ── Enums / data classes ───────────────────────────────────────────────────────
 
 enum class GameState { PLAYING, WIN, LOSE }
-
-// ── Floating damage label ──────────────────────────────────────────────────────
 
 private data class FloatNum(
     val text:    BitmapText,
@@ -73,14 +71,15 @@ class DungeonGame : SimpleApplication() {
     private lateinit var playerNode: Node
     private lateinit var humanoid:   Humanoid
 
-    // Boss
+    // Boss — spawned further back so it doesn't immediately aggro.
+    // Player spawns at z=5; boss at z=-11 → initial distance ≈ 16 > DETECT_RANGE(12).
     private lateinit var dragonBoss: DragonBoss
-    private val bossSpawnPos = Vector3f(0f, 0f, -7f)
+    private val bossSpawnPos = Vector3f(0f, 0f, -11f)
 
     // Player movement
     private var targetPosition:    Vector3f? = null
-    private var facing           = Vector3f(0f, 0f, -1f)
-    private var lastMoveDistance = 0f
+    private var facing             = Vector3f(0f, 0f, -1f)
+    private var lastMoveDistance   = 0f
 
     // Timers
     private var attackTimer    = 0f
@@ -95,8 +94,17 @@ class DungeonGame : SimpleApplication() {
     var gameState: GameState = GameState.PLAYING
         private set
 
-    /** Fired on the GL thread when the game ends; wire up from MainActivity. */
+    /**
+     * Fired on the GL thread when the game ends.
+     * Wire up from MainActivity (remember to post UI changes to the UI thread).
+     */
     var onGameOver: ((won: Boolean) -> Unit)? = null
+
+    /**
+     * Fired on the GL thread at the end of simpleInitApp — all assets are loaded
+     * and the scene is ready. Use to dismiss a loading overlay from the UI.
+     */
+    var onInitComplete: (() -> Unit)? = null
 
     // HUD
     private lateinit var hudFont:      BitmapFont
@@ -109,7 +117,7 @@ class DungeonGame : SimpleApplication() {
     private var lastPlayerHp = -1
     private var lastBossHp   = -1
 
-    // Floating numbers
+    // Floating damage numbers
     private val floatNums = mutableListOf<FloatNum>()
 
     /** Written by the Android UI / desktop input layer. */
@@ -118,6 +126,10 @@ class DungeonGame : SimpleApplication() {
     // ── Lifecycle ──────────────────────────────────────────────────────────────
 
     override fun simpleInitApp() {
+        // Hide the jME debug stats/FPS counter shown in the bottom-left corner.
+        setDisplayStatView(false)
+        setDisplayFps(false)
+
         setupCamera()
         setupLighting()
         setupGround()
@@ -125,7 +137,10 @@ class DungeonGame : SimpleApplication() {
         setupPlayer()
         setupBoss()
         setupHUD()
-        setupMouseInput()   // best-effort; silently skipped on Android
+        setupMouseInput()
+
+        // Signal the loading overlay that the scene is fully ready.
+        onInitComplete?.invoke()
     }
 
     // ── Setup ──────────────────────────────────────────────────────────────────
@@ -157,7 +172,7 @@ class DungeonGame : SimpleApplication() {
     }
 
     private fun setupGround() {
-        val g = Geometry("Ground", Quad(40f, 40f)).apply {
+        rootNode.attachChild(Geometry("Ground", Quad(40f, 40f)).apply {
             material = mat("Common/MatDefs/Light/Lighting.j3md") {
                 setBoolean("UseMaterialColors", true)
                 setColor("Diffuse", ColorRGBA(0.28f, 0.25f, 0.22f, 1f))
@@ -165,8 +180,7 @@ class DungeonGame : SimpleApplication() {
             }
             rotate(-FastMath.HALF_PI, 0f, 0f)
             setLocalTranslation(-20f, 0f, 20f)
-        }
-        rootNode.attachChild(g)
+        })
     }
 
     private fun setupWalls() {
@@ -175,7 +189,6 @@ class DungeonGame : SimpleApplication() {
             setColor("Diffuse", ColorRGBA(0.35f, 0.30f, 0.25f, 1f))
             setColor("Ambient", ColorRGBA(0.10f, 0.09f, 0.08f, 1f))
         }
-        // [centerX, centerY, centerZ, halfW, halfH, halfD]
         listOf(
             floatArrayOf( 0f,  1.5f, -14f,  14f, 1.5f, 0.5f),
             floatArrayOf( 0f,  1.5f,  14f,  14f, 1.5f, 0.5f),
@@ -231,9 +244,8 @@ class DungeonGame : SimpleApplication() {
     }
 
     /**
-     * Register a desktop click-to-move mapping.
-     * Wrapped in try/catch because on Android the mouse input backend is absent
-     * and InputManager may throw when a MouseButtonTrigger is registered.
+     * Mouse click-to-move for desktop play.
+     * Silently skipped on Android where mouse input is not registered.
      */
     private fun setupMouseInput() {
         try {
@@ -247,7 +259,7 @@ class DungeonGame : SimpleApplication() {
     private val tapListener = ActionListener { _, isPressed, _ ->
         if (!isPressed) return@ActionListener
         when (gameState) {
-            GameState.PLAYING          -> handleClickMove()
+            GameState.PLAYING            -> handleClickMove()
             GameState.WIN, GameState.LOSE -> restartGame()
         }
     }
@@ -267,25 +279,28 @@ class DungeonGame : SimpleApplication() {
         }
     }
 
-    // ── Public restart ─────────────────────────────────────────────────────────
+    // ── Public restart — MUST be called on the GL thread ──────────────────────
+    //
+    //  From Android: use  app.enqueue(Callable { game.restartGame(); null })
+    //  From desktop: the tapListener already runs on the GL thread.
 
     fun restartGame() {
-        playerHp           = PLAYER_MAX_HP
+        playerHp          = PLAYER_MAX_HP
         playerNode.setLocalTranslation(0f, 0f, 5f)
-        facing             = Vector3f(0f, 0f, -1f)
-        attackTimer        = 0f;  attackCooldown = 0f
-        dashTimer          = 0f;  dashCooldown   = 0f
-        attackHitDealt     = false
-        targetPosition     = null;  lastMoveDistance = 0f
-        input.moveX        = 0f;  input.moveY    = 0f
-        input.swordQueued  = false; input.dashQueued  = false
-        input.shieldHeld   = false
+        facing            = Vector3f(0f, 0f, -1f)
+        attackTimer       = 0f;  attackCooldown = 0f
+        dashTimer         = 0f;  dashCooldown   = 0f
+        attackHitDealt    = false
+        targetPosition    = null;  lastMoveDistance = 0f
+        input.moveX       = 0f;  input.moveY    = 0f
+        input.swordQueued = false; input.dashQueued  = false
+        input.shieldHeld  = false
 
         dragonBoss.node.setLocalTranslation(bossSpawnPos.clone())
         dragonBoss.node.localRotation = Quaternion.IDENTITY
         dragonBoss.reset()
 
-        lastPlayerHp = -1; lastBossHp = -1
+        lastPlayerHp = -1;  lastBossHp = -1
         statusText.text  = ""
         restartHint.text = ""
         floatNums.forEach { guiNode.detachChild(it.text) }
@@ -350,7 +365,7 @@ class DungeonGame : SimpleApplication() {
                 val toT = targetPosition!!.subtract(playerNode.localTranslation)
                     .also { it.y = 0f }
                 if (toT.length() < 0.08f) {
-                    targetPosition = null; lastMoveDistance = 0f; return
+                    targetPosition = null;  lastMoveDistance = 0f;  return
                 }
                 moveDir = toT.normalize()
                 speed   = MOVE_SPEED
@@ -363,7 +378,7 @@ class DungeonGame : SimpleApplication() {
         playerNode.move(step)
         lastMoveDistance = step.length()
 
-        // Clamp inside arena
+        // Clamp inside arena (replaces physics wall collision)
         val p = playerNode.localTranslation
         playerNode.setLocalTranslation(
             p.x.coerceIn(-ARENA_HALF, ARENA_HALF),
@@ -389,7 +404,7 @@ class DungeonGame : SimpleApplication() {
     private fun updateBoss(tpf: Float) {
         val bossHit = dragonBoss.update(tpf, playerNode.localTranslation)
 
-        // Pin Y to ground regardless of root-bone drift
+        // Pin boss Y to ground — some animation root-bone channels drift it upward.
         val p = dragonBoss.node.localTranslation
         if (p.y != 0f) dragonBoss.node.setLocalTranslation(p.x, 0f, p.z)
 
@@ -398,23 +413,20 @@ class DungeonGame : SimpleApplication() {
             playerHp = (playerHp - 1).coerceAtLeast(0)
             when {
                 wasAlive && playerHp == 0 -> endGame(false)
-                wasAlive -> spawnDmgNum(
-                    playerNode.localTranslation.add(0f, 1.5f, 0f),
-                    "-1", ColorRGBA(1f, 0.25f, 0.25f, 1f)
-                )
+                wasAlive -> spawnDmgNum(playerNode.localTranslation.add(0f, 1.5f, 0f),
+                    "-1", ColorRGBA(1f, 0.25f, 0.25f, 1f))
             }
         }
 
-        if (dragonBoss.state == DragonBoss.State.DEAD && gameState == GameState.PLAYING) {
+        if (dragonBoss.state == DragonBoss.State.DEAD && gameState == GameState.PLAYING)
             endGame(true)
-        }
     }
 
     // ── Sword hit ──────────────────────────────────────────────────────────────
 
     private fun checkSwordHit() {
         if (attackTimer <= 0f || attackHitDealt) return
-        if ((1f - attackTimer / ATTACK_DURATION) > 0.60f) return   // past active frames
+        if ((1f - attackTimer / ATTACK_DURATION) > 0.60f) return  // past active frames
 
         val dist = playerNode.localTranslation.distance(dragonBoss.node.localTranslation)
         if (dist <= SWORD_HIT_RANGE) {
@@ -460,9 +472,7 @@ class DungeonGame : SimpleApplication() {
         val sc = cam.getScreenCoordinates(worldPos)
         val c  = color.clone()
         val t  = BitmapText(hudFont, false).apply {
-            size = 24f
-            text = label
-            this.color = c
+            size = 24f; text = label; this.color = c
             setLocalTranslation(sc.x - 10f, sc.y, 5f)
         }
         guiNode.attachChild(t)
@@ -510,8 +520,7 @@ class DungeonGame : SimpleApplication() {
 
     private fun hudText(txt: String, size: Float, x: Float, y: Float): BitmapText =
         BitmapText(hudFont, false).apply {
-            this.size = size
-            text = txt
+            this.size = size;  text = txt
             setLocalTranslation(x, y, 2f)
             guiNode.attachChild(this)
         }

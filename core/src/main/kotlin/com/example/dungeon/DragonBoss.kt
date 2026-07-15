@@ -15,50 +15,38 @@ import com.jme3.scene.Spatial
 //  "Walk_New", "Run_New", "Idel_New" (sic), "Fly_New"
 //  (Fly_New has root-Y motion so we avoid it for ground states.)
 
-private const val DRAGON_SCALE     = 0.08f
+private const val DRAGON_SCALE    = 0.08f
 
-private const val BOSS_MAX_HP      = 8
+private const val BOSS_MAX_HP     = 8
 
-private const val DETECT_RANGE     = 14f   // boss starts chasing within this distance
-private const val ATTACK_RANGE     = 5.0f  // triggers windup when closer than this
-private const val BOSS_HIT_DIST    = 3.5f  // boss must be this close to actually deal damage
+// Boss does NOT chase until the player walks within DETECT_RANGE.
+// Spawn is at z=-11, player starts at z=5 → initial distance ≈ 16 > 12.
+private const val DETECT_RANGE    = 12f
+private const val ATTACK_RANGE    = 5.0f   // triggers windup
+private const val BOSS_HIT_DIST   = 3.5f   // lunge deals damage within this
 
-private const val MOVE_SPEED_WALK  = 2.4f  // world-units/sec (slow chase)
-private const val MOVE_SPEED_RUN   = 5.0f  // world-units/sec (fast chase)
-private const val LUNGE_SPEED      = 9.0f  // world-units/sec during attack
-private const val MAX_LUNGE_DIST   = 4.5f  // boss stops lunging after this many world-units
+private const val MOVE_SPEED_WALK = 2.4f
+private const val MOVE_SPEED_RUN  = 4.8f
+private const val LUNGE_SPEED     = 8.5f
+private const val MAX_LUNGE_DIST  = 4.5f   // hard cap on lunge travel
 
-private const val WINDUP_DURATION  = 0.90f // seconds of telegraph before lunge
-private const val STAGGER_DURATION = 0.80f // seconds of stagger when hit
-private const val POST_ATK_PAUSE   = 0.70f // stagger duration after a completed lunge
+private const val WINDUP_DURATION  = 0.90f
+private const val STAGGER_DURATION = 0.80f
+private const val POST_ATK_PAUSE   = 0.65f
 
-private const val ANIM_IDLE  = "Idel_New"  // sic — matches the baked clip name
-private const val ANIM_WALK  = "Walk_New"
-private const val ANIM_RUN   = "Run_New"
-// Fly_New is intentionally unused: it contains root-Y motion that
-// makes the dragon float off the ground.
+private const val ANIM_IDLE = "Idel_New"  // sic — matches baked clip name
+private const val ANIM_WALK = "Walk_New"
+private const val ANIM_RUN  = "Run_New"
+// Fly_New intentionally excluded: root-Y motion floats the dragon off the ground.
 
 // ── DragonBoss ────────────────────────────────────────────────────────────────
 
-/**
- * Dragon boss with a four-state ground AI: IDLE → CHASE → WINDUP → ATTACK → STAGGER.
- *
- * Call [update] every frame; it returns `true` on the single frame the lunge
- * connects so the caller can decrement player HP once.
- *
- * Call [takeDamage] when the player's sword swing registers a hit.
- * Call [reset] to bring the boss back to full health at its spawn position.
- */
 class DragonBoss(private val assetManager: AssetManager) {
 
     enum class State { IDLE, CHASE, WINDUP, ATTACK, STAGGER, DEAD }
 
-    // ── Scene ──────────────────────────────────────────────────────────────────
-
     /** Outer node — attach to rootNode; translate this for world movement. */
     val node = Node("DragonBossNode")
-
-    // ── Stats ──────────────────────────────────────────────────────────────────
 
     var hp: Int = BOSS_MAX_HP
         private set
@@ -67,42 +55,47 @@ class DragonBoss(private val assetManager: AssetManager) {
     var state: State = State.IDLE
         private set
 
-    // ── Animation ─────────────────────────────────────────────────────────────
-
     private val composer: AnimComposer?
     private var currentAnim = ""
 
-    // ── AI state ──────────────────────────────────────────────────────────────
+    // Set to true after each init/reset; first update() call fires playAnim so
+    // the AnimComposer is guaranteed to be in the scene graph first.
+    private var needsAnimInit = true
 
     private var stateTimer = 0f
     private var lungeDir   = Vector3f(0f, 0f, -1f)
-    private var lungeMoved = 0f   // world-units covered in the current lunge
-    private var hitDone    = false // one hit per lunge
+    private var lungeMoved = 0f
+    private var hitDone    = false
 
     // ── Init ──────────────────────────────────────────────────────────────────
 
     init {
         val model: Spatial = assetManager.loadModel("Models/Dragon/dragon.glb")
 
-        // Scale to dungeon size. Only scale the model — not the node — so
-        // world-space distance math (ATTACK_RANGE etc.) works directly.
+        // Scale only the model child, not the node, so world-space distance math
+        // (ATTACK_RANGE, BOSS_HIT_DIST, …) works directly in world units.
         model.setLocalScale(DRAGON_SCALE)
 
-        // Blender → glTF: model faces +Z; jME forward is -Z → rotate 180° around Y.
+        // Blender → glTF: model face is +Z; jME forward is -Z → rotate 180° Y.
         model.rotate(0f, FastMath.PI, 0f)
 
         node.attachChild(model)
 
         composer = findAnimComposer(model)
-        playAnim(ANIM_IDLE)
+        // Do NOT call playAnim here — AnimComposer.setCurrentAction() silently
+        // no-ops if the spatial hasn't had its first scene-graph update yet.
+        // needsAnimInit = true (already set above) defers it to first update().
     }
 
     // ── Public API ─────────────────────────────────────────────────────────────
 
-    /**
-     * Advance AI one frame.  Returns `true` on the frame the boss attack lands.
-     */
     fun update(tpf: Float, playerPos: Vector3f): Boolean {
+        // Defer first animation start until after the node is in the scene.
+        if (needsAnimInit) {
+            needsAnimInit = false
+            playAnim(ANIM_IDLE)
+        }
+
         if (state == State.DEAD) return false
 
         stateTimer = (stateTimer - tpf).coerceAtLeast(0f)
@@ -120,7 +113,6 @@ class DragonBoss(private val assetManager: AssetManager) {
         }
     }
 
-    /** Apply one sword hit.  Interrupts the current action and staggers. */
     fun takeDamage(amount: Int = 1) {
         if (state == State.DEAD) return
         hp = (hp - amount).coerceAtLeast(0)
@@ -132,13 +124,13 @@ class DragonBoss(private val assetManager: AssetManager) {
         }
     }
 
-    /** Reset to full health so the game can be replayed without reloading. */
     fun reset() {
         hp         = maxHp
         stateTimer = 0f
         lungeMoved = 0f
         hitDone    = false
         lungeDir.set(0f, 0f, -1f)
+        needsAnimInit = true   // re-trigger animation init after scene reset
         go(State.IDLE)
     }
 
@@ -155,7 +147,6 @@ class DragonBoss(private val assetManager: AssetManager) {
             stateTimer = WINDUP_DURATION
             return false
         }
-
         val fast   = dist > DETECT_RANGE * 0.55f
         val speed  = if (fast) MOVE_SPEED_RUN else MOVE_SPEED_WALK
         val target = if (fast) ANIM_RUN else ANIM_WALK
@@ -169,7 +160,7 @@ class DragonBoss(private val assetManager: AssetManager) {
     }
 
     private fun tickWindup(tpf: Float, toPlayer: Vector3f): Boolean {
-        face(toPlayer) // keep facing the player during telegraph
+        face(toPlayer)
         if (stateTimer <= 0f) {
             lungeDir   = if (toPlayer.lengthSquared() > 0.001f) toPlayer.normalize() else lungeDir
             lungeMoved = 0f
@@ -180,11 +171,10 @@ class DragonBoss(private val assetManager: AssetManager) {
     }
 
     private fun tickAttack(tpf: Float, dist: Float): Boolean {
-        // Lunge forward up to MAX_LUNGE_DIST then stop.
-        val maxStep  = (MAX_LUNGE_DIST - lungeMoved).coerceAtLeast(0f)
-        val wantStep = LUNGE_SPEED * tpf
-        val step     = minOf(wantStep, maxStep)
-        if (step > 0f) {
+        // Advance the lunge only while budget remains AND we haven't already hit.
+        if (!hitDone && lungeMoved < MAX_LUNGE_DIST) {
+            val remaining = MAX_LUNGE_DIST - lungeMoved
+            val step      = minOf(LUNGE_SPEED * tpf, remaining)
             node.move(lungeDir.mult(step))
             lungeMoved += step
         }
@@ -195,7 +185,10 @@ class DragonBoss(private val assetManager: AssetManager) {
             hitPlayer = true
         }
 
-        if (lungeMoved >= MAX_LUNGE_DIST) {
+        // Transition to stagger when:
+        //  a) lunge budget exhausted, OR
+        //  b) hit connected (stop sliding through the player)
+        if (lungeMoved >= MAX_LUNGE_DIST || hitDone) {
             go(State.STAGGER)
             stateTimer = POST_ATK_PAUSE
         }
@@ -214,7 +207,7 @@ class DragonBoss(private val assetManager: AssetManager) {
         when (next) {
             State.IDLE    -> playAnim(ANIM_IDLE)
             State.CHASE   -> playAnim(ANIM_WALK)
-            State.WINDUP  -> playAnim(ANIM_IDLE)  // stand still during telegraph
+            State.WINDUP  -> playAnim(ANIM_IDLE)
             State.ATTACK  -> playAnim(ANIM_RUN)
             State.STAGGER -> playAnim(ANIM_IDLE)
             State.DEAD    -> playAnim(ANIM_IDLE)
@@ -234,12 +227,10 @@ class DragonBoss(private val assetManager: AssetManager) {
         try {
             c.setCurrentAction(name)
             currentAnim = name
-        } catch (e: Exception) {
-            // Animation clip not found in this model build — degrade gracefully.
+        } catch (_: Exception) {
+            // Clip not found in this model build — degrade gracefully.
         }
     }
-
-    // ── Utility ────────────────────────────────────────────────────────────────
 
     companion object {
         fun findAnimComposer(spatial: Spatial): AnimComposer? {
