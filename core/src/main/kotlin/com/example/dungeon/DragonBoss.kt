@@ -8,95 +8,99 @@ import com.jme3.math.Vector3f
 import com.jme3.scene.Node
 import com.jme3.scene.Spatial
 
-// ── Tuning knobs ──────────────────────────────────────────────────────────────
+// ── Tuning ────────────────────────────────────────────────────────────────────
+//
+//  Model space height ≈ 30.4 units → scale 0.08 gives ~2.4 world-unit boss.
+//  Actual clip names extracted from the .glb JSON chunk:
+//  "Walk_New", "Run_New", "Idel_New" (sic), "Fly_New"
+//  (Fly_New has root-Y motion so we avoid it for ground states.)
 
-private const val DRAGON_SCALE     = 0.01f   // adjust if the model appears too large/small
+private const val DRAGON_SCALE     = 0.08f
+
 private const val BOSS_MAX_HP      = 8
 
-private const val DETECT_RANGE     = 14f     // world units; boss starts chasing within this
-private const val ATTACK_RANGE     = 3.2f    // world units; triggers windup when this close
+private const val DETECT_RANGE     = 14f   // boss starts chasing within this distance
+private const val ATTACK_RANGE     = 5.0f  // triggers windup when closer than this
+private const val BOSS_HIT_DIST    = 3.5f  // boss must be this close to actually deal damage
 
-private const val MOVE_SPEED_WALK  = 2.4f    // world-units/sec in the walk phase
-private const val MOVE_SPEED_RUN   = 4.8f    // world-units/sec in the run phase
-private const val LUNGE_SPEED      = 10f     // world-units/sec during the attack lunge
+private const val MOVE_SPEED_WALK  = 2.4f  // world-units/sec (slow chase)
+private const val MOVE_SPEED_RUN   = 5.0f  // world-units/sec (fast chase)
+private const val LUNGE_SPEED      = 9.0f  // world-units/sec during attack
+private const val MAX_LUNGE_DIST   = 4.5f  // boss stops lunging after this many world-units
 
-private const val WINDUP_DURATION  = 0.85f   // seconds of telegraph before attack
-private const val ATTACK_DURATION  = 0.40f   // seconds of lunge
-private const val STAGGER_DURATION = 0.80f   // seconds of stagger after being hit
+private const val WINDUP_DURATION  = 0.90f // seconds of telegraph before lunge
+private const val STAGGER_DURATION = 0.80f // seconds of stagger when hit
+private const val POST_ATK_PAUSE   = 0.70f // stagger duration after a completed lunge
+
+private const val ANIM_IDLE  = "Idel_New"  // sic — matches the baked clip name
+private const val ANIM_WALK  = "Walk_New"
+private const val ANIM_RUN   = "Run_New"
+// Fly_New is intentionally unused: it contains root-Y motion that
+// makes the dragon float off the ground.
 
 // ── DragonBoss ────────────────────────────────────────────────────────────────
 
 /**
- * Self-contained dragon boss: loads the glTF model, owns its scene node, and
- * drives a simple four-state AI that chases and attacks the player.
+ * Dragon boss with a four-state ground AI: IDLE → CHASE → WINDUP → ATTACK → STAGGER.
  *
- * Call [update] every frame while the game is playing; it returns `true` on the
- * single frame in which the boss's attack should deal damage to the player.
+ * Call [update] every frame; it returns `true` on the single frame the lunge
+ * connects so the caller can decrement player HP once.
  *
- * Call [takeDamage] when the player's sword swing connects.
+ * Call [takeDamage] when the player's sword swing registers a hit.
+ * Call [reset] to bring the boss back to full health at its spawn position.
  */
-class DragonBoss(assetManager: AssetManager) {
-
-    // ── State ──────────────────────────────────────────────────────────────────
+class DragonBoss(private val assetManager: AssetManager) {
 
     enum class State { IDLE, CHASE, WINDUP, ATTACK, STAGGER, DEAD }
+
+    // ── Scene ──────────────────────────────────────────────────────────────────
+
+    /** Outer node — attach to rootNode; translate this for world movement. */
+    val node = Node("DragonBossNode")
+
+    // ── Stats ──────────────────────────────────────────────────────────────────
 
     var hp: Int = BOSS_MAX_HP
         private set
     val maxHp: Int = BOSS_MAX_HP
+
     var state: State = State.IDLE
         private set
 
-    // ── Scene ──────────────────────────────────────────────────────────────────
-
-    /**
-     * Outer node that the caller (DungeonGame) attaches to rootNode and moves.
-     * Keep origin at the dragon's feet so y=0 keeps it on the ground.
-     */
-    val node = Node("DragonBossNode")
+    // ── Animation ─────────────────────────────────────────────────────────────
 
     private val composer: AnimComposer?
-    private var currentAnimName = ""
+    private var currentAnim = ""
+
+    // ── AI state ──────────────────────────────────────────────────────────────
+
     private var stateTimer = 0f
+    private var lungeDir   = Vector3f(0f, 0f, -1f)
+    private var lungeMoved = 0f   // world-units covered in the current lunge
+    private var hitDone    = false // one hit per lunge
 
-    // The lunge direction is captured at the moment the attack begins so the
-    // dragon commits to it even if the player side-steps.
-    private var lungeDirection = Vector3f(0f, 0f, -1f)
-
-    // Whether we have already delivered hit-damage in the current ATTACK phase.
-    private var hitDelivered = false
+    // ── Init ──────────────────────────────────────────────────────────────────
 
     init {
-        // Load the glTF model.  assetManager resolves paths relative to the
-        // assets folder, so "Models/Dragon/dragon.glb" matches
-        // app/src/main/assets/Models/Dragon/dragon.glb.
         val model: Spatial = assetManager.loadModel("Models/Dragon/dragon.glb")
 
-        // Scale the model down to dungeon scale.  The outer node stays at 1:1
-        // so that world-space distance checks (ATTACK_RANGE etc.) work directly.
+        // Scale to dungeon size. Only scale the model — not the node — so
+        // world-space distance math (ATTACK_RANGE etc.) works directly.
         model.setLocalScale(DRAGON_SCALE)
 
-        // Blender → glTF exports typically face +Z; jME's "forward" is -Z.
-        // Rotate 180° around Y so the dragon faces in the direction it moves.
+        // Blender → glTF: model faces +Z; jME forward is -Z → rotate 180° around Y.
         model.rotate(0f, FastMath.PI, 0f)
 
         node.attachChild(model)
 
-        // Find the AnimComposer wherever it is in the model hierarchy and play
-        // the idle clip immediately so the dragon is animated from the first frame.
         composer = findAnimComposer(model)
-        playAnim("Idle")
+        playAnim(ANIM_IDLE)
     }
 
     // ── Public API ─────────────────────────────────────────────────────────────
 
     /**
-     * Advance the AI for one frame.
-     *
-     * @param tpf       Time-per-frame in seconds.
-     * @param playerPos Player's world-space position.
-     * @return `true` on the one frame in which the boss attack connects
-     *         (caller should decrement player HP once).
+     * Advance AI one frame.  Returns `true` on the frame the boss attack lands.
      */
     fun update(tpf: Float, playerPos: Vector3f): Boolean {
         if (state == State.DEAD) return false
@@ -107,130 +111,137 @@ class DragonBoss(assetManager: AssetManager) {
         val dist     = toPlayer.length()
 
         return when (state) {
-            State.IDLE     -> tickIdle(dist)
-            State.CHASE    -> tickChase(tpf, toPlayer, dist)
-            State.WINDUP   -> tickWindup(toPlayer, dist)
-            State.ATTACK   -> tickAttack(tpf, playerPos, dist)
-            State.STAGGER  -> tickStagger()
-            State.DEAD     -> false
+            State.IDLE    -> tickIdle(dist)
+            State.CHASE   -> tickChase(tpf, toPlayer, dist)
+            State.WINDUP  -> tickWindup(tpf, toPlayer)
+            State.ATTACK  -> tickAttack(tpf, dist)
+            State.STAGGER -> tickStagger()
+            State.DEAD    -> false
         }
     }
 
-    /**
-     * Apply one hit of sword damage to the boss.
-     * Interrupts any non-dead state and triggers a brief stagger.
-     */
+    /** Apply one sword hit.  Interrupts the current action and staggers. */
     fun takeDamage(amount: Int = 1) {
         if (state == State.DEAD) return
         hp = (hp - amount).coerceAtLeast(0)
         if (hp == 0) {
-            transitionTo(State.DEAD)
+            go(State.DEAD)
         } else {
-            transitionTo(State.STAGGER)
+            go(State.STAGGER)
             stateTimer = STAGGER_DURATION
         }
     }
 
-    // ── AI ticks ───────────────────────────────────────────────────────────────
+    /** Reset to full health so the game can be replayed without reloading. */
+    fun reset() {
+        hp         = maxHp
+        stateTimer = 0f
+        lungeMoved = 0f
+        hitDone    = false
+        lungeDir.set(0f, 0f, -1f)
+        go(State.IDLE)
+    }
+
+    // ── State ticks ────────────────────────────────────────────────────────────
 
     private fun tickIdle(dist: Float): Boolean {
-        if (dist <= DETECT_RANGE) transitionTo(State.CHASE)
+        if (dist <= DETECT_RANGE) go(State.CHASE)
         return false
     }
 
     private fun tickChase(tpf: Float, toPlayer: Vector3f, dist: Float): Boolean {
         if (dist <= ATTACK_RANGE) {
-            transitionTo(State.WINDUP)
+            go(State.WINDUP)
             stateTimer = WINDUP_DURATION
             return false
         }
 
-        // Switch between walk (close) and run (far) animation.
-        val targetAnim = if (dist > DETECT_RANGE * 0.6f) "Run" else "Walk"
-        if (currentAnimName != targetAnim) playAnim(targetAnim)
+        val fast   = dist > DETECT_RANGE * 0.55f
+        val speed  = if (fast) MOVE_SPEED_RUN else MOVE_SPEED_WALK
+        val target = if (fast) ANIM_RUN else ANIM_WALK
+        if (currentAnim != target) playAnim(target)
 
-        val speed = if (dist > DETECT_RANGE * 0.6f) MOVE_SPEED_RUN else MOVE_SPEED_WALK
         if (dist > 0.1f) {
-            val step = toPlayer.normalize().mult(speed * tpf)
-            node.move(step)
-            faceDirection(toPlayer)
+            node.move(toPlayer.normalize().mult(speed * tpf))
+            face(toPlayer)
         }
         return false
     }
 
-    private fun tickWindup(toPlayer: Vector3f, dist: Float): Boolean {
-        // Stand still facing the player; launch when the timer expires.
-        faceDirection(toPlayer)
+    private fun tickWindup(tpf: Float, toPlayer: Vector3f): Boolean {
+        face(toPlayer) // keep facing the player during telegraph
         if (stateTimer <= 0f) {
-            // Capture lunge direction at commit time.
-            lungeDirection = if (dist > 0.01f) toPlayer.normalize() else lungeDirection
-            hitDelivered = false
-            transitionTo(State.ATTACK)
-            stateTimer = ATTACK_DURATION
+            lungeDir   = if (toPlayer.lengthSquared() > 0.001f) toPlayer.normalize() else lungeDir
+            lungeMoved = 0f
+            hitDone    = false
+            go(State.ATTACK)
         }
         return false
     }
 
-    private fun tickAttack(tpf: Float, playerPos: Vector3f, dist: Float): Boolean {
-        // Lunge forward at high speed for the duration.
-        val step = lungeDirection.mult(LUNGE_SPEED * tpf)
-        node.move(step)
+    private fun tickAttack(tpf: Float, dist: Float): Boolean {
+        // Lunge forward up to MAX_LUNGE_DIST then stop.
+        val maxStep  = (MAX_LUNGE_DIST - lungeMoved).coerceAtLeast(0f)
+        val wantStep = LUNGE_SPEED * tpf
+        val step     = minOf(wantStep, maxStep)
+        if (step > 0f) {
+            node.move(lungeDir.mult(step))
+            lungeMoved += step
+        }
 
         var hitPlayer = false
-        // Deliver damage once, on whichever frame the boss is close enough.
-        if (!hitDelivered && dist <= ATTACK_RANGE * 1.3f) {
-            hitDelivered = true
-            hitPlayer    = true
+        if (!hitDone && dist <= BOSS_HIT_DIST) {
+            hitDone   = true
+            hitPlayer = true
         }
 
-        if (stateTimer <= 0f) {
-            transitionTo(State.STAGGER)
-            stateTimer = STAGGER_DURATION * 0.5f   // shorter stagger after a full attack
+        if (lungeMoved >= MAX_LUNGE_DIST) {
+            go(State.STAGGER)
+            stateTimer = POST_ATK_PAUSE
         }
         return hitPlayer
     }
 
     private fun tickStagger(): Boolean {
-        if (stateTimer <= 0f) transitionTo(State.CHASE)
+        if (stateTimer <= 0f) go(State.CHASE)
         return false
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
 
-    private fun transitionTo(next: State) {
+    private fun go(next: State) {
         state = next
         when (next) {
-            State.IDLE    -> playAnim("Idle")
-            State.CHASE   -> playAnim("Walk")
-            State.WINDUP  -> playAnim("Fly")   // "Fly" reads well as a threat pose
-            State.ATTACK  -> playAnim("Run")   // fast lunge uses run anim
-            State.STAGGER -> playAnim("Idle")
-            State.DEAD    -> playAnim("Idle")
+            State.IDLE    -> playAnim(ANIM_IDLE)
+            State.CHASE   -> playAnim(ANIM_WALK)
+            State.WINDUP  -> playAnim(ANIM_IDLE)  // stand still during telegraph
+            State.ATTACK  -> playAnim(ANIM_RUN)
+            State.STAGGER -> playAnim(ANIM_IDLE)
+            State.DEAD    -> playAnim(ANIM_IDLE)
         }
     }
 
-    private fun faceDirection(dir: Vector3f) {
-        if (dir.lengthSquared() < 0.0001f) return
-        val flat = Vector3f(dir.x, 0f, dir.z).normalizeLocal()
+    private fun face(dir: Vector3f) {
+        val flat = Vector3f(dir.x, 0f, dir.z)
         if (flat.lengthSquared() < 0.0001f) return
+        flat.normalizeLocal()
         node.localRotation = Quaternion().lookAt(flat, Vector3f.UNIT_Y)
     }
 
     private fun playAnim(name: String) {
         val c = composer ?: return
-        if (currentAnimName == name) return
+        if (currentAnim == name) return
         try {
             c.setCurrentAction(name)
-            currentAnimName = name
+            currentAnim = name
         } catch (e: Exception) {
-            // Clip not present in this model version — ignore gracefully.
+            // Animation clip not found in this model build — degrade gracefully.
         }
     }
 
     // ── Utility ────────────────────────────────────────────────────────────────
 
     companion object {
-        /** Recursive search for the first AnimComposer anywhere in the model tree. */
         fun findAnimComposer(spatial: Spatial): AnimComposer? {
             spatial.getControl(AnimComposer::class.java)?.let { return it }
             if (spatial is Node) {
