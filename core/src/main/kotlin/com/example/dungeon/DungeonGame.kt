@@ -12,6 +12,8 @@ import com.jme3.light.DirectionalLight
 import com.jme3.light.PointLight
 import com.jme3.material.Material
 import com.jme3.math.ColorRGBA
+import com.jme3.math.FastMath
+import com.jme3.math.Quaternion
 import com.jme3.math.Ray
 import com.jme3.math.Vector3f
 import com.jme3.scene.Geometry
@@ -30,6 +32,16 @@ private const val CAM_HEIGHT   = 18f   // camera Y above the ground
 private const val CAM_DISTANCE = 12f   // camera Z behind the look-at point
 private const val CAM_PITCH    = -55f  // tilt angle in degrees (negative = look down)
 
+private const val JOYSTICK_DEADZONE  = 0.15f
+private const val SHIELD_SLOW_FACTOR = 0.45f  // movement speed multiplier while blocking
+
+private const val ATTACK_DURATION = 0.42f  // seconds, sword swing
+private const val ATTACK_COOLDOWN = 0.18f  // seconds after a swing before another can start
+
+private const val DASH_DURATION  = 0.22f   // seconds
+private const val DASH_COOLDOWN  = 0.55f   // seconds after a dash before another can start
+private const val DASH_SPEED     = 20f     // world-units per second while dashing
+
 // ── Main application ───────────────────────────────────────────────────────────
 
 class DungeonGame : SimpleApplication() {
@@ -39,12 +51,32 @@ class DungeonGame : SimpleApplication() {
 
     // Scene objects
     private lateinit var playerNode:   Node
-    private lateinit var playerGeom:   Geometry
+    private lateinit var humanoid:     Humanoid
     private lateinit var groundGeom:   Geometry
     private val wallGeoms = mutableListOf<Geometry>()
 
-    // Click-to-move state
+    // Click-to-move state (desktop mouse fallback; joystick input takes
+    // priority over this when the player is actively steering it)
     private var targetPosition: Vector3f? = null
+
+    // Facing direction, updated whenever the player actually moves. Used so
+    // dashing/attacking have a direction to work with even the instant the
+    // player stops pushing the joystick.
+    private var facing = Vector3f(0f, 0f, -1f)
+
+    // Combat/movement action state
+    private var attackTimer   = 0f  // counts down from ATTACK_DURATION while a swing is playing
+    private var attackCooldown = 0f
+    private var dashTimer     = 0f  // counts down from DASH_DURATION while dashing
+    private var dashCooldown  = 0f
+    private var dashDirection = Vector3f(0f, 0f, -1f)
+
+    /**
+     * Shared input state. The Android module's on-screen joystick/buttons
+     * write into this every frame from the UI thread; desktop currently
+     * only uses mouse click-to-move and leaves it untouched.
+     */
+    val input = PlayerInput()
 
     // ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -167,20 +199,11 @@ class DungeonGame : SimpleApplication() {
     // ── Player ─────────────────────────────────────────────────────────────────
 
     private fun setupPlayer() {
-        // Stand-in: red box. Replace with assetManager.loadModel("...") later.
-        playerGeom = Geometry("Player", Box(0.4f, 0.6f, 0.4f)).apply {
-            material = Material(assetManager, "Common/MatDefs/Light/Lighting.j3md").apply {
-                setBoolean("UseMaterialColors", true)
-                setColor("Diffuse", ColorRGBA(0.85f, 0.15f, 0.15f, 1f))
-                setColor("Ambient", ColorRGBA(0.25f, 0.05f, 0.05f, 1f))
-                setColor("Specular", ColorRGBA(1f, 0.8f, 0.8f, 1f))
-                setFloat("Shininess", 32f)
-            }
-        }
+        humanoid = Humanoid(assetManager)
 
         playerNode = Node("PlayerNode")
-        playerNode.attachChild(playerGeom)
-        playerNode.setLocalTranslation(0f, 0.6f, 0f)   // y = half-height above ground
+        playerNode.attachChild(humanoid.root)
+        playerNode.setLocalTranslation(0f, 0f, 0f)   // feet at ground level
         rootNode.attachChild(playerNode)
     }
 
@@ -207,8 +230,8 @@ class DungeonGame : SimpleApplication() {
         for (i in 0 until results.size()) {
             val hit = results.getCollision(i)
             if (hit.geometry.name == "Ground") {
-                // Keep y fixed at player height so we don't clip into the floor
-                targetPosition = Vector3f(hit.contactPoint.x, 0.6f, hit.contactPoint.z)
+                // Player's origin sits at its feet, flush with the floor
+                targetPosition = Vector3f(hit.contactPoint.x, 0f, hit.contactPoint.z)
                 break
             }
         }
@@ -217,21 +240,88 @@ class DungeonGame : SimpleApplication() {
     // ── Update loop ────────────────────────────────────────────────────────────
 
     override fun simpleUpdate(tpf: Float) {
+        updateActionTimers(tpf)
         movePlayer(tpf)
         followCamera()
+        updateHumanoid(tpf)
+    }
+
+    /** Advances attack/dash timers and consumes one-shot button presses queued by the UI. */
+    private fun updateActionTimers(tpf: Float) {
+        if (attackTimer > 0f) attackTimer = (attackTimer - tpf).coerceAtLeast(0f)
+        if (attackCooldown > 0f) attackCooldown = (attackCooldown - tpf).coerceAtLeast(0f)
+        if (dashTimer > 0f) dashTimer = (dashTimer - tpf).coerceAtLeast(0f)
+        if (dashCooldown > 0f) dashCooldown = (dashCooldown - tpf).coerceAtLeast(0f)
+
+        if (input.swordQueued) {
+            input.swordQueued = false
+            if (attackCooldown <= 0f) {
+                attackTimer = ATTACK_DURATION
+                attackCooldown = ATTACK_DURATION + ATTACK_COOLDOWN
+            }
+        }
+        if (input.dashQueued) {
+            input.dashQueued = false
+            if (dashCooldown <= 0f) {
+                dashTimer = DASH_DURATION
+                dashCooldown = DASH_DURATION + DASH_COOLDOWN
+                dashDirection = facing.clone()
+            }
+        }
     }
 
     private fun movePlayer(tpf: Float) {
-        val target = targetPosition ?: return
-        val current = playerNode.localTranslation
-        val toTarget = target.subtract(current).also { it.y = 0f }
+        val joystickVec = Vector3f(input.moveX, 0f, -input.moveY)
+        val joystickMag = joystickVec.length()
 
-        if (toTarget.length() < 0.08f) {
-            targetPosition = null
-            return
+        val moveDir: Vector3f
+        val speed: Float
+
+        when {
+            dashTimer > 0f -> {
+                moveDir = dashDirection
+                speed = DASH_SPEED
+            }
+            joystickMag > JOYSTICK_DEADZONE -> {
+                targetPosition = null // joystick overrides desktop click-to-move
+                moveDir = joystickVec.normalize()
+                speed = MOVE_SPEED * joystickMag.coerceAtMost(1f)
+            }
+            targetPosition != null -> {
+                val toTarget = targetPosition!!.subtract(playerNode.localTranslation).also { it.y = 0f }
+                if (toTarget.length() < 0.08f) {
+                    targetPosition = null
+                    lastMoveDistance = 0f
+                    return
+                }
+                moveDir = toTarget.normalize()
+                speed = MOVE_SPEED
+            }
+            else -> {
+                lastMoveDistance = 0f
+                return
+            }
         }
 
-        playerNode.move(toTarget.normalize().mult(MOVE_SPEED * tpf))
+        val slow = if (input.shieldHeld) SHIELD_SLOW_FACTOR else 1f
+        val step = moveDir.mult(speed * slow * tpf)
+        playerNode.move(step)
+        lastMoveDistance = step.length()
+
+        if (dashTimer <= 0f && moveDir.lengthSquared() > 0.0001f) {
+            facing = moveDir.clone()
+        }
+        playerNode.localRotation = Quaternion().lookAt(facing, Vector3f.UNIT_Y)
+    }
+
+    private var lastMoveDistance = 0f
+
+    private fun updateHumanoid(tpf: Float) {
+        val moving = lastMoveDistance > 0.0001f
+        val speedScale = (lastMoveDistance / (MOVE_SPEED * tpf).coerceAtLeast(0.0001f)).coerceIn(0f, 1.5f)
+        val attack01 = if (attackTimer > 0f) 1f - (attackTimer / ATTACK_DURATION) else null
+        val dash01 = if (dashTimer > 0f) 1f - (dashTimer / DASH_DURATION) else null
+        humanoid.update(tpf, moving, speedScale, attack01, dash01, input.shieldHeld)
     }
 
     private fun followCamera() {
