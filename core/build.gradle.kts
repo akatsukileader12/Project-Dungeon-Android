@@ -31,10 +31,9 @@ dependencies {
     // primitive geometry.
     implementation("org.jmonkeyengine:jme3-plugins:$jmeVersion")
 
-    // Compile-only: gives us the com.jme3.bullet.* API surface (Minie is a
-    // drop-in replacement for the discontinued jme3-bullet) without pulling
-    // in native binaries. The "+bare" variant ships zero natives.
-    compileOnly("com.github.stephengold:Minie:9.0.1+bare")
+    // Physics removed: player/boss movement is pure transform math (top-down,
+    // no gravity). BulletAppState / Minie native-lib loading was the most
+    // likely cause of the blank-screen crash on device.
 }
 
 kotlin {

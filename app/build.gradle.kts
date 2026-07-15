@@ -53,6 +53,5 @@ dependencies {
     implementation("org.jmonkeyengine:jme3-android:$jmeVersion")
     implementation("org.jmonkeyengine:jme3-android-native:$jmeVersion")
 
-    // Bullet physics -- Android-native variant (arm64/armeabi/x86/x86_64 .so)
-    implementation("com.github.stephengold:Minie:9.0.1+droid")
+    // Physics removed (see core/build.gradle.kts for rationale).
 }
